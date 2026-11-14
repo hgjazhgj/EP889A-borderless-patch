@@ -7,6 +7,10 @@ or executed, and no printer API is used. The original DLL is never modified.
 """
 from __future__ import annotations
 
+# Assertions are required for file and integrity validation, including imports.
+if not __debug__:
+    raise SystemExit("Run without -O/-OO or PYTHONOPTIMIZE; integrity checks require assertions.")
+
 import argparse
 import base64
 import ctypes
@@ -30,19 +34,13 @@ TEMPLATE_BASE64 = (
 )
 
 
-def require(condition, message):
-    if not condition:
-        raise ValueError(message)
-
-
 def sha256(data):
     return hashlib.sha256(data).hexdigest()
 
 
 def template_bytes():
     data = base64.b64decode(TEMPLATE_BASE64, validate=True)
-    require(len(data) == 664 and sha256(data) == TEMPLATE_SHA256,
-            "Embedded dialog template failed its integrity check")
+    assert len(data) == 664 and sha256(data) == TEMPLATE_SHA256, "Embedded dialog template failed its integrity check"
     return data
 
 
@@ -51,21 +49,20 @@ class PE:
 
     def __init__(self, data):
         self.data = data
-        require(data[:2] == b"MZ", "Not a PE file")
+        assert data[:2] == b"MZ", "Not a PE file"
         self.pe_offset = self.unpack("<I", 60)[0]
-        require(data[self.pe_offset:self.pe_offset + 4] == b"PE\0\0", "Missing PE signature")
-        require(self.unpack("<H", self.pe_offset + 4)[0] == 0x8664, "Expected an x64 DLL")
+        assert data[self.pe_offset:self.pe_offset + 4] == b"PE\0\0", "Missing PE signature"
+        assert self.unpack("<H", self.pe_offset + 4)[0] == 0x8664, "Expected an x64 DLL"
         self.optional = self.pe_offset + 24
         optional_size = self.unpack("<H", self.pe_offset + 20)[0]
-        require(self.unpack("<H", self.optional)[0] == 0x20B, "Expected PE32+")
-        require(optional_size >= 240 and self.unpack("<I", self.optional + 108)[0] >= 16,
-                "Truncated or unsupported optional header")
+        assert self.unpack("<H", self.optional)[0] == 0x20B, "Expected PE32+"
+        assert optional_size >= 240 and self.unpack("<I", self.optional + 108)[0] >= 16, "Truncated or unsupported optional header"
         self.bounds(self.optional, optional_size)
         self.sections = {}
         for index in range(self.unpack("<H", self.pe_offset + 6)[0]):
             entry = self.optional + optional_size + index * 40
             name, virtual_size, rva, raw_size, raw = self.unpack("<8sIIII", entry)
-            require(name not in self.sections, "Duplicate PE section")
+            assert name not in self.sections, "Duplicate PE section"
             self.bounds(raw, raw_size)
             self.sections[name] = (virtual_size, rva, raw_size, raw)
         self.resource_rva, self.resource_size = self.directory(2)
@@ -74,8 +71,7 @@ class PE:
         self._walk(0)
 
     def bounds(self, offset, size):
-        require(offset >= 0 and size >= 0 and offset + size <= len(self.data),
-                "PE structure points outside the file")
+        assert offset >= 0 and size >= 0 and offset + size <= len(self.data), "PE structure points outside the file"
 
     def unpack(self, fmt, offset):
         self.bounds(offset, struct.calcsize(fmt))
@@ -93,8 +89,7 @@ class PE:
         raise ValueError("Resource RVA has no complete file-backed section")
 
     def _resource_position(self, relative, size):
-        require(relative >= 0 and relative + size <= self.resource_size,
-                "Resource directory pointer exceeds its declared boundary")
+        assert relative >= 0 and relative + size <= self.resource_size, "Resource directory pointer exceeds its declared boundary"
         self.bounds(self.resource_base + relative, size)
         return self.resource_base + relative
 
@@ -107,8 +102,7 @@ class PE:
         return self.data[position:position + units * 2].decode("utf-16le")
 
     def _walk(self, relative, prefix=(), ancestors=frozenset()):
-        require(relative not in ancestors and len(prefix) < 3,
-                "Cyclic or excessively deep resource directory")
+        assert relative not in ancestors and len(prefix) < 3, "Cyclic or excessively deep resource directory"
         position = self._resource_position(relative, 16)
         named, numbered = self.unpack("<HH", position + 12)
         self._resource_position(relative, 16 + (named + numbered) * 8)
@@ -118,8 +112,7 @@ class PE:
             if child & 0x80000000:
                 self._walk(child & 0x7FFFFFFF, current, ancestors | {relative})
             else:
-                require(len(current) == 3 and current not in self.resources,
-                        "Unexpected or duplicate resource leaf")
+                assert len(current) == 3 and current not in self.resources, "Unexpected or duplicate resource leaf"
                 entry = self._resource_position(child, 16)
                 rva, size, codepage, reserved = self.unpack("<IIII", entry)
                 offset = self.rva_offset(rva, size)
@@ -130,13 +123,13 @@ class PE:
 
 def parse_dialog(data):
     """Read the reviewed standard DLGTEMPLATE, including all child controls."""
-    require(len(data) >= 18, "Truncated dialog template")
+    assert len(data) >= 18, "Truncated dialog template"
     style, exstyle, count, x, y, width, height = struct.unpack_from("<IIHhhhh", data)
     position = 18
 
     def word():
         nonlocal position
-        require(position + 2 <= len(data), "Truncated dialog field")
+        assert position + 2 <= len(data), "Truncated dialog field"
         result = struct.unpack_from("<H", data, position)[0]
         position += 2
         return result
@@ -155,19 +148,18 @@ def parse_dialog(data):
     items = {}
     for _ in range(count):
         position = (position + 3) & ~3
-        require(position + 18 <= len(data), "Truncated dialog control")
+        assert position + 18 <= len(data), "Truncated dialog control"
         st, ex, ix, iy, iw, ih, control_id = struct.unpack_from("<IIhhhhH", data, position)
         position += 18
         cls, label = text(), text()
         extra = word()
         if extra:
-            require(extra >= 2, "Invalid dialog creation data")
+            assert extra >= 2, "Invalid dialog creation data"
             position += extra - 2
-        require(position <= len(data) and control_id not in items,
-                "Invalid or duplicate dialog control")
+        assert position <= len(data) and control_id not in items, "Invalid or duplicate dialog control"
         items[control_id] = {"style": st, "exstyle": ex, "class": cls,
                              "text": label, "rect": (ix, iy, iw, ih)}
-    require(position == len(data), "Unexpected trailing dialog data")
+    assert position == len(data), "Unexpected trailing dialog data"
     return {"style": style, "exstyle": exstyle, "count": count,
             "rect": (x, y, width, height), "menu": menu, "class": window_class,
             "title": title, "font": font, "items": items}
@@ -175,18 +167,16 @@ def parse_dialog(data):
 
 def check_dialogs(before, after):
     a, b = parse_dialog(before), parse_dialog(after)
-    require(a["count"] == 10 and b["count"] == 14, "Unexpected dialog versions")
-    require(set(b["items"]) - set(a["items"]) == {4066, 4067, 4068, 4069},
-            "Unexpected added controls")
+    assert a["count"] == 10 and b["count"] == 14, "Unexpected dialog versions"
+    assert set(b["items"]) - set(a["items"]) == {4066, 4067, 4068, 4069}, "Unexpected added controls"
     for key in ("style", "exstyle", "menu", "class", "title", "font"):
-        require(a[key] == b[key], "Dialog header differs beyond the reviewed changes")
-    require(b["rect"] == (*a["rect"][:3], a["rect"][3] + 60), "Unexpected dialog dimensions")
+        assert a[key] == b[key], "Dialog header differs beyond the reviewed changes"
+    assert b["rect"] == (*a["rect"][:3], a["rect"][3] + 60), "Unexpected dialog dimensions"
     for control_id, item in a["items"].items():
         other = b["items"][control_id]
         for key in ("style", "exstyle", "class", "text"):
-            require(item[key] == other[key], "Shared dialog control changed")
-        require(other["rect"] == (item["rect"][0], item["rect"][1] + 60, *item["rect"][2:]),
-                "Shared control is not at the reviewed position")
+            assert item[key] == other[key], "Shared dialog control changed"
+        assert other["rect"] == (item["rect"][0], item["rect"][1] + 60, *item["rect"][2:]), "Shared control is not at the reviewed position"
 
 
 def checksum(data, offset):
@@ -203,41 +193,34 @@ def checksum(data, offset):
 
 def validate(source_data, candidate_data):
     """Validate the complete resource inventory, code/data, PE metadata and dialog."""
-    require(sha256(source_data) == SOURCE_SHA256, "Original DLL SHA256 does not match the supported build")
+    assert sha256(source_data) == SOURCE_SHA256, "Original DLL SHA256 does not match the supported build"
     original, candidate = PE(source_data), PE(candidate_data)
     replacement = template_bytes()
-    require(len(original.resources) == 428 and original.resources.keys() == candidate.resources.keys(),
-            "Resource inventory changed")
+    assert len(original.resources) == 428 and original.resources.keys() == candidate.resources.keys(), "Resource inventory changed"
     changed = [key for key in original.resources
                if original.resources[key]["payload"] != candidate.resources[key]["payload"]]
-    require(changed == [TARGET], "Unexpected changed resource payloads")
-    require(candidate.resources[TARGET]["payload"] == replacement, "Wrong replacement dialog")
+    assert changed == [TARGET], "Unexpected changed resource payloads"
+    assert candidate.resources[TARGET]["payload"] == replacement, "Wrong replacement dialog"
     for key, old in original.resources.items():
         new = candidate.resources[key]
-        require((old["codepage"], old["reserved"]) == (new["codepage"], new["reserved"]),
-                "Resource leaf metadata changed")
-    require(original.sections.keys() == candidate.sections.keys(), "Section inventory changed")
+        assert (old["codepage"], old["reserved"]) == (new["codepage"], new["reserved"]), "Resource leaf metadata changed"
+    assert original.sections.keys() == candidate.sections.keys(), "Section inventory changed"
     for name, old in original.sections.items():
         if name.rstrip(b"\0") == b".rsrc":
             continue
         new = candidate.sections[name]
-        require(old[0] == new[0] and old[2] == new[2], "Nonresource section size changed")
+        assert old[0] == new[0] and old[2] == new[2], "Nonresource section size changed"
         if name.rstrip(b"\0") != b".reloc":
-            require(old[1] == new[1], "Nonresource code/data RVA changed")
-        require(source_data[old[3]:old[3] + old[2]] == candidate_data[new[3]:new[3] + new[2]],
-                "Nonresource section contents changed")
-    require(candidate.directory(4) == (0, 0), "Invalid or unexpected certificate directory")
-    require(candidate.directory(5) == (candidate.sections[b".reloc\0\0"][1], original.directory(5)[1]),
-            "Relocation directory does not match its section")
+            assert old[1] == new[1], "Nonresource code/data RVA changed"
+        assert source_data[old[3]:old[3] + old[2]] == candidate_data[new[3]:new[3] + new[2]], "Nonresource section contents changed"
+    assert candidate.directory(4) == (0, 0), "Invalid or unexpected certificate directory"
+    assert candidate.directory(5) == (candidate.sections[b".reloc\0\0"][1], original.directory(5)[1]), "Relocation directory does not match its section"
     for index in range(16):
         if index not in (2, 4, 5):
-            require(original.directory(index) == candidate.directory(index), "Unrelated PE directory changed")
-    require(original.unpack("<I", original.optional + 64)[0] == checksum(source_data, original.optional + 64),
-            "Checksum algorithm does not match the original")
-    require(candidate.unpack("<I", candidate.optional + 64)[0] == checksum(candidate_data, candidate.optional + 64),
-            "Candidate PE checksum mismatch")
-    require(len(candidate_data) == max(section[3] + section[2] for section in candidate.sections.values()),
-            "Unexpected candidate overlay")
+            assert original.directory(index) == candidate.directory(index), "Unrelated PE directory changed"
+    assert original.unpack("<I", original.optional + 64)[0] == checksum(source_data, original.optional + 64), "Checksum algorithm does not match the original"
+    assert candidate.unpack("<I", candidate.optional + 64)[0] == checksum(candidate_data, candidate.optional + 64), "Candidate PE checksum mismatch"
+    assert len(candidate_data) == max(section[3] + section[2] for section in candidate.sections.values()), "Unexpected candidate overlay"
     check_dialogs(original.resources[TARGET]["payload"], replacement)
     digest = sha256(candidate_data)
     return {"verified": True, "bytes": len(candidate_data), "sha256": digest,
@@ -250,7 +233,7 @@ def validate(source_data, candidate_data):
 
 def finalize(source_data, modified_data):
     original, modified = PE(source_data), PE(modified_data)
-    require(original.resources.keys() == modified.resources.keys(), "Resource inventory changed during update")
+    assert original.resources.keys() == modified.resources.keys(), "Resource inventory changed during update"
     data = bytearray(modified_data)
     for key, leaf in modified.resources.items():
         old = original.resources[key]
@@ -264,21 +247,16 @@ def finalize(source_data, modified_data):
 
 
 def build(source, output):
-    require(sys.platform == "win32" and ctypes.sizeof(ctypes.c_void_p) == 8,
-            "Building requires native x64 Windows Python")
+    assert sys.platform == "win32" and ctypes.sizeof(ctypes.c_void_p) == 8, "Building requires native x64 Windows Python"
     source = Path(source).resolve(strict=True)
     requested_output = Path(output).absolute()
-    require(not requested_output.exists() and not requested_output.is_symlink(),
-            "Output must be a new file, not an existing file or symbolic link")
+    assert not requested_output.exists() and not requested_output.is_symlink(), "Output must be a new file, not an existing file or symbolic link"
     output = requested_output.resolve()
-    require(source != output and not output.exists(),
-            "Output must be a new file, separate from the original")
-    require(output.parent.is_dir(), "Output parent directory must already exist")
+    assert source != output and not output.exists(), "Output must be a new file, separate from the original"
+    assert output.parent.is_dir(), "Output parent directory must already exist"
     original_data = source.read_bytes()
-    require(sha256(original_data) == SOURCE_SHA256, "Original DLL SHA256 does not match the supported build")
-    original = PE(original_data)
+    assert sha256(original_data) == SOURCE_SHA256, "Original DLL SHA256 does not match the supported build"
     replacement = template_bytes()
-    check_dialogs(original.resources[TARGET]["payload"], replacement)
     temporary = output.parent / ("." + output.name + ".build-" + uuid.uuid4().hex)
     try:
         with temporary.open("xb") as stream:
@@ -315,7 +293,7 @@ def build(source, output):
             stream.truncate()
             stream.flush()
             os.fsync(stream.fileno())
-        require(temporary.read_bytes() == data, "Final output readback mismatch")
+        assert temporary.read_bytes() == data, "Final output readback mismatch"
         # On Windows rename refuses an existing destination; no file is overwritten.
         os.rename(temporary, output)
         result["output"] = str(output)
@@ -340,7 +318,7 @@ def main(argv=None):
             result = build(args.source, args.output)
         print(json.dumps(result, indent=2))
         return 0
-    except (ValueError, OSError, KeyError, struct.error, UnicodeError) as error:
+    except (AssertionError, ValueError, OSError, KeyError, struct.error) as error:
         print(json.dumps({"error": str(error)}), file=sys.stderr)
         return 1
 
